@@ -1,0 +1,37 @@
+enclave {
+    
+    include "user_types.h" /* buffer_t */
+
+    /* 
+     * ocall_print_string - invokes OCALL to display string buffer inside the enclave.
+     *  [in]: copy the string buffer to App outside.
+     *  [string]: specifies 'str' is a NULL terminated buffer.
+     */
+    untrusted {
+        void ocall_print_string([in, string] const char *str);
+    };
+
+    // trusted {
+
+    //     public void ecall_type_char(char val);
+    //     public void ecall_type_int(int val);
+
+    //     public void ecall_type_float(float val);
+    //     public void ecall_type_double(double val);
+
+    //     public void ecall_type_size_t(size_t val);
+    //     public void ecall_type_wchar_t(wchar_t val);
+
+    //     public void ecall_type_struct(struct struct_foo_t val);
+    //     public void ecall_type_enum_union(enum enum_foo_t val1, [user_check] union union_foo_t *val2);
+        
+    //     /* for using user defined types, please refer to Pointers.edl, Arrays.edl. */
+    // };
+
+    trusted {
+        public int ecall_ice(int a, int b);
+        public int ecall_buf([in, out, count=size] int *ptr, size_t size);
+        public int ecall_buf2([in, out, count=size] int *ptr, size_t size, [in, out, count=size2] int *ptr2, size_t size2);
+    };
+
+};

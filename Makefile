@@ -45,10 +45,12 @@ else
 	ocamlbuild -cflags -ccopt,-fpie -lflags -runtime-variant,_pic,-ccopt,-pie,-ccopt -lflag "-Wl,-z,now"  -no-links -libs str,unix Edger8r.native
 endif
 
-$(BUILD_DIR):
-	@$(MKDIR) $@
-
 .PHONY:
 clean:
 	@ocamlbuild Edger8r.native -clean
-	@$(RM) $(BUILD_DIR)/sgx_edger8r
+	@$(RM) _build
+
+.ONESHELL:
+naive:
+	cd samples/NaiveSample
+	../../_build/Edger8r.native ./Enclave.edl

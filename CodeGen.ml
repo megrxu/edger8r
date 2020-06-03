@@ -116,6 +116,31 @@ let get_allowed_names (ufs: Ast.untrusted_func list) =
   in
     List.flatten allow_lists |> dedup_list
 
+let empty_ptr_attr : Ast.ptr_attr = {
+  pa_direction  = PtrNoDirection;
+  pa_size       = Ast.empty_ptr_size;
+  pa_isptr      = false;
+  pa_isary      = false;
+  pa_isstr      = false;
+  pa_iswstr     = false;
+  pa_rdonly     = false;
+  pa_chkptr     = false;
+}
+
+let param_meta_t_def : Ast.composite_type = (Ast.StructDef {sname="param_meta_t"; smlist=[
+  (Ast.PTPtr (Ast.Void, empty_ptr_attr), {identifier="*ms"; array_dims=[]});
+  (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
+  (Ast.PTPtr (Ast.Foreign "buf_meta_t", empty_ptr_attr), {identifier="*arr"; array_dims=[]});
+  (Ast.PTVal Ast.SizeT, {identifier="arr_size"; array_dims=[]});
+  (Ast.PTVal Ast.SizeT, {identifier="ret_offset"; array_dims=[]});
+  (Ast.PTVal Ast.SizeT, {identifier="ret_size"; array_dims=[]});
+  ]})
+let buf_meta_t_def : Ast.composite_type = (Ast.StructDef {sname="buf_meta_t"; smlist=[
+  (Ast.PTVal Ast.SizeT, {identifier="offset"; array_dims=[]});
+  (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
+  (Ast.PTVal (Int {ia_signedness= Ast.Signed; ia_shortness=Ast.INone}), {identifier="in_out"; array_dims=[]});
+]})
+
 (* With `parse_enclave_ast', each enclave AST is traversed only once. *)
 let parse_enclave_ast (e: Ast.enclave) =
   let ac_include_list = ref [] in
@@ -223,6 +248,10 @@ let mk_len_var2 name1 name2 = "_len_" ^ name1 ^ "_" ^ name2
 let mk_in_var name = "_in_" ^ name
 let mk_in_var2 name1 name2 = "_in_" ^ name1 ^ "_" ^ name2
 let mk_ocall_table_name enclave_name = "ocall_table_" ^ enclave_name
+
+(* Little functions to build the new structures *)
+let mk_ms_param_meta_name = "ms_param_meta"
+let mk_ms_buf_meta_name = "ms_buf_meta"
 
 (* Un-trusted bridge name is prefixed with enclave file short name. *)
 let mk_ubridge_name (enclave_name: string) (funcname: string) =
@@ -879,7 +908,7 @@ let gen_func_uproxy (tf: Ast.trusted_func) (idx: int) (ec: enclave_content) =
 
   (* Normal case - do ECALL with marshaling structure*)
   let ecall_with_ms = sprintf "status = %s(%s, %d, %s, &%s);"
-                              sgx_ecall_fn eid_name idx ocall_table_ptr ms_struct_val in
+                              sgx_ecall_fn eid_name idx ocall_table_ptr mk_ms_param_meta_name in
 
   (* Rare case - the trusted function doesn't have parameter nor return value.
    * In this situation, no marshaling structure is required - passing in NULL.
@@ -2194,6 +2223,8 @@ let gen_ocall_table (ec: enclave_content) =
       nr_ocall
       (if nr_ocall <> 0 then ocall_table else "\t{ NULL },\n")
 
+let additional_struct_defs = [buf_meta_t_def; param_meta_t_def]
+
 (* It generates untrusted code to be saved in a `.c' file. *)
 let gen_untrusted_source (ec: enclave_content) =
   let code_fname = get_usource_name ec.file_shortnm in
@@ -2212,6 +2243,8 @@ let gen_untrusted_source (ec: enclave_content) =
     ms_writer out_chan ec;
     List.iter (fun s -> output_string out_chan (s ^ "\n")) ubridge_list;
     output_string out_chan (gen_ocall_table ec);
+    output_string out_chan "\n";
+    List.iter (fun s -> output_string out_chan (gen_comp_def s ^ "\n")) additional_struct_defs;
     List.iter (fun s -> output_string out_chan (s ^ "\n")) uproxy_list;
     close_out out_chan
 
