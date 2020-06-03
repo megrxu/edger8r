@@ -116,6 +116,7 @@ let get_allowed_names (ufs: Ast.untrusted_func list) =
   in
     List.flatten allow_lists |> dedup_list
 
+(* Additional definitons *)
 let empty_ptr_attr : Ast.ptr_attr = {
   pa_direction  = PtrNoDirection;
   pa_size       = Ast.empty_ptr_size;
@@ -126,7 +127,6 @@ let empty_ptr_attr : Ast.ptr_attr = {
   pa_rdonly     = false;
   pa_chkptr     = false;
 }
-
 let param_meta_t_def : Ast.composite_type = (Ast.StructDef {sname="param_meta_t"; smlist=[
   (Ast.PTPtr (Ast.Void, empty_ptr_attr), {identifier="*ms"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
@@ -891,6 +891,56 @@ let fill_ms_field (isptr: bool) (pd: Ast.pdecl) =
       let tystr = Ast.get_tystr (Ast.Ptr (Ast.get_param_atype pt)) in
       sprintf "%s%s%s = (%s)%s;" ms_struct_val accessor ms_member_name tystr param_name
 
+let tfunc_ptrs (tf: Ast.trusted_func) =
+  List.filter (fun (pt, _) -> match pt with
+                                          | Ast.PTVal _ -> false
+                                          | _           -> true) tf.tf_fdecl.plist
+
+let get_ptr_size (pa: Ast.ptr_attr) = 
+  match pa.pa_size.ps_size with
+  | Some v -> (match v with
+               | Ast.ANumber n -> sprintf "%d" n
+               | Ast.AString s -> s)
+  | None -> "0"
+
+(* FIXME: offset computation *)
+let gen_buf_meta (pd: Ast.pdecl) idx l =
+  match pd with
+  | (Ast.PTPtr (pt, pa), _) -> List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") "" [
+                                sprintf "buf_meta[%d].in_out = %d;" idx (match pa.pa_direction with
+                                                                         | Ast.PtrIn          -> 1
+                                                                         | Ast.PtrOut         -> 2
+                                                                         | Ast.PtrInOut       -> 3
+                                                                         | Ast.PtrNoDirection -> 4);
+                                sprintf "buf_meta[%d].offset = 0;" idx;
+                                sprintf "buf_meta[%d].size = %s * sizeof(%s);" idx (get_ptr_size pa) (Ast.get_tystr pt)
+                                ]
+  | _ -> ""
+
+(* FIXME: indent issue *)
+let gen_meta_trusted (tf: Ast.trusted_func) =
+  let ptrs = tfunc_ptrs tf in
+  let ptrs_count = List.length ptrs in
+  let arr = (if (ptrs_count == 0) then "NULL" else "buf_meta") in
+  let buf_decl = (if (ptrs_count == 0) then "" else sprintf "buf_meta_t buf_meta[%d];\n" ptrs_count) in
+  let rec gen_buf_decls l res decls idx = 
+    match res with
+      | [] -> decls
+      | hd::tl -> decls ^ gen_buf_meta hd idx l ^ gen_buf_decls (hd::l) tl decls idx
+  in
+  let buf_decls = gen_buf_decls [] ptrs "" 0 in
+  List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") "" [
+        buf_decl;
+        buf_decls;
+        "param_meta_t ms_param_meta;";
+        "ms_param_meta.ms = &ms;";
+        "ms_param_meta.size = sizeof(ms);";
+        sprintf "ms_param_meta.arr = %s;" arr;
+        sprintf "ms_param_meta.arr_size = %d;" ptrs_count;
+        "ms_param_meta.ret_size = sizeof(int);";
+        "ms_param_meta.ret_offset = 0;";
+        ]
+
 (* Generate untrusted proxy code for a given trusted function. *)
 let gen_func_uproxy (tf: Ast.trusted_func) (idx: int) (ec: enclave_content) =
   let fd = tf.Ast.tf_fdecl in
@@ -925,6 +975,8 @@ let gen_func_uproxy (tf: Ast.trusted_func) (idx: int) (ec: enclave_content) =
       begin
         func_body := declare_ms_expr :: !func_body;
         List.iter (fun pd -> func_body := fill_ms_field false pd :: !func_body) fd.Ast.plist;
+        (* Add the meta declarations *)
+        func_body := gen_meta_trusted tf :: !func_body;
         func_body := ecall_with_ms :: !func_body;
         if fd.Ast.rtype <> Ast.Void then func_body := update_retval :: !func_body;
           List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") func_open (List.rev !func_body) ^ func_close
@@ -2243,6 +2295,7 @@ let gen_untrusted_source (ec: enclave_content) =
     ms_writer out_chan ec;
     List.iter (fun s -> output_string out_chan (s ^ "\n")) ubridge_list;
     output_string out_chan (gen_ocall_table ec);
+    (* Write additional struct definitions to untrusted source code *)
     output_string out_chan "\n";
     List.iter (fun s -> output_string out_chan (gen_comp_def s ^ "\n")) additional_struct_defs;
     List.iter (fun s -> output_string out_chan (s ^ "\n")) uproxy_list;
