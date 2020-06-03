@@ -117,20 +117,10 @@ let get_allowed_names (ufs: Ast.untrusted_func list) =
     List.flatten allow_lists |> dedup_list
 
 (* Additional definitons *)
-let empty_ptr_attr : Ast.ptr_attr = {
-  pa_direction  = PtrNoDirection;
-  pa_size       = Ast.empty_ptr_size;
-  pa_isptr      = false;
-  pa_isary      = false;
-  pa_isstr      = false;
-  pa_iswstr     = false;
-  pa_rdonly     = false;
-  pa_chkptr     = false;
-}
 let param_meta_t_def : Ast.composite_type = (Ast.StructDef {sname="param_meta_t"; smlist=[
-  (Ast.PTPtr (Ast.Void, empty_ptr_attr), {identifier="*ms"; array_dims=[]});
+  (Ast.PTVal (Ast.Ptr Ast.Void), {identifier="ms"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
-  (Ast.PTPtr (Ast.Foreign "buf_meta_t", empty_ptr_attr), {identifier="*arr"; array_dims=[]});
+  (Ast.PTVal (Ast.Ptr (Ast.Foreign "buf_meta_t")), {identifier="arr"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="arr_size"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="ret_offset"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="ret_size"; array_dims=[]});
@@ -897,22 +887,21 @@ let tfunc_ptrs (tf: Ast.trusted_func) =
                                           | _           -> true) tf.tf_fdecl.plist
 
 let get_ptr_size (pa: Ast.ptr_attr) = 
-  match pa.pa_size.ps_size with
+  match pa.pa_size.ps_count with
   | Some v -> (match v with
                | Ast.ANumber n -> sprintf "%d" n
                | Ast.AString s -> s)
   | None -> "0"
 
-(* FIXME: offset computation *)
-let gen_buf_meta (pd: Ast.pdecl) idx l =
+let gen_buf_meta (pd: Ast.pdecl) idx =
   match pd with
-  | (Ast.PTPtr (pt, pa), _) -> List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") "" [
+  | (Ast.PTPtr (Ast.Ptr pt, pa), pdc) -> List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") "" [
                                 sprintf "buf_meta[%d].in_out = %d;" idx (match pa.pa_direction with
                                                                          | Ast.PtrIn          -> 1
                                                                          | Ast.PtrOut         -> 2
                                                                          | Ast.PtrInOut       -> 3
                                                                          | Ast.PtrNoDirection -> 4);
-                                sprintf "buf_meta[%d].offset = 0;" idx;
+                                sprintf "buf_meta[%d].offset = (unsigned char*)(&ms.%s) - (unsigned char*)(&ms);" idx (mk_ms_member_name pdc.identifier);
                                 sprintf "buf_meta[%d].size = %s * sizeof(%s);" idx (get_ptr_size pa) (Ast.get_tystr pt)
                                 ]
   | _ -> ""
@@ -923,12 +912,12 @@ let gen_meta_trusted (tf: Ast.trusted_func) =
   let ptrs_count = List.length ptrs in
   let arr = (if (ptrs_count == 0) then "NULL" else "buf_meta") in
   let buf_decl = (if (ptrs_count == 0) then "" else sprintf "buf_meta_t buf_meta[%d];\n" ptrs_count) in
-  let rec gen_buf_decls l res decls idx = 
+  let rec gen_buf_decls res decls idx = 
     match res with
       | [] -> decls
-      | hd::tl -> decls ^ gen_buf_meta hd idx l ^ gen_buf_decls (hd::l) tl decls idx
+      | hd::tl -> decls ^ gen_buf_meta hd idx ^ gen_buf_decls tl decls (idx + 1)
   in
-  let buf_decls = gen_buf_decls [] ptrs "" 0 in
+  let buf_decls = gen_buf_decls ptrs "" 0 in
   List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") "" [
         buf_decl;
         buf_decls;
