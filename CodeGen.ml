@@ -116,21 +116,6 @@ let get_allowed_names (ufs: Ast.untrusted_func list) =
   in
     List.flatten allow_lists |> dedup_list
 
-(* Additional definitons *)
-let param_meta_t_def : Ast.composite_type = (Ast.StructDef {sname="param_meta_t"; smlist=[
-  (Ast.PTVal (Ast.Ptr Ast.Void), {identifier="ms"; array_dims=[]});
-  (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
-  (Ast.PTVal (Ast.Ptr (Ast.Foreign "buf_meta_t")), {identifier="arr"; array_dims=[]});
-  (Ast.PTVal Ast.SizeT, {identifier="arr_size"; array_dims=[]});
-  (Ast.PTVal Ast.SizeT, {identifier="ret_offset"; array_dims=[]});
-  (Ast.PTVal Ast.SizeT, {identifier="ret_size"; array_dims=[]});
-  ]})
-let buf_meta_t_def : Ast.composite_type = (Ast.StructDef {sname="buf_meta_t"; smlist=[
-  (Ast.PTVal Ast.SizeT, {identifier="offset"; array_dims=[]});
-  (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
-  (Ast.PTVal (Int {ia_signedness= Ast.Signed; ia_shortness=Ast.INone}), {identifier="in_out"; array_dims=[]});
-]})
-
 (* With `parse_enclave_ast', each enclave AST is traversed only once. *)
 let parse_enclave_ast (e: Ast.enclave) =
   let ac_include_list = ref [] in
@@ -239,9 +224,27 @@ let mk_in_var name = "_in_" ^ name
 let mk_in_var2 name1 name2 = "_in_" ^ name1 ^ "_" ^ name2
 let mk_ocall_table_name enclave_name = "ocall_table_" ^ enclave_name
 
-(* Little functions to build the new structures *)
-let mk_ms_param_meta_name = "ms_param_meta"
-let mk_ms_buf_meta_name = "ms_buf_meta"
+(* New structures var names *)
+let param_meta_name = "ms_param_meta"
+let buf_meta_name = "ms_buf_meta"
+(* Additional definitons *)
+let param_meta_t_def : Ast.composite_type = (Ast.StructDef {sname="param_meta_t"; smlist=[
+  (Ast.PTVal (Ast.Ptr Ast.Void), {identifier="ms"; array_dims=[]});
+  (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
+  (Ast.PTVal (Ast.Ptr (Ast.Foreign "buf_meta_t")), {identifier="arr"; array_dims=[]});
+  (Ast.PTVal Ast.SizeT, {identifier="arr_size"; array_dims=[]});
+  (Ast.PTVal Ast.SizeT, {identifier="ret_offset"; array_dims=[]});
+  (Ast.PTVal Ast.SizeT, {identifier="ret_size"; array_dims=[]});
+  ]})
+let buf_meta_t_def : Ast.composite_type = (Ast.StructDef {sname="buf_meta_t"; smlist=[
+  (Ast.PTVal Ast.SizeT, {identifier="offset"; array_dims=[]});
+  (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
+  (Ast.PTVal (Int {ia_signedness= Ast.Signed; ia_shortness=Ast.INone}), {identifier="in_out"; array_dims=[]});
+]})
+let param_meta_t_decl : Ast.pdecl = (Ast.PTVal (Ast.Foreign "param_meta_t"), {identifier=param_meta_name;array_dims=[]})
+let buf_meta_t_decl : Ast.pdecl = (Ast.PTVal (Ast.Foreign "buf_meta_t"), {identifier=param_meta_name;array_dims=[]})
+let additional_struct_defs = [buf_meta_t_def; param_meta_t_def]
+let additional_struct_decl = [buf_meta_t_decl; param_meta_t_decl]
 
 (* Un-trusted bridge name is prefixed with enclave file short name. *)
 let mk_ubridge_name (enclave_name: string) (funcname: string) =
@@ -882,53 +885,106 @@ let fill_ms_field (isptr: bool) (pd: Ast.pdecl) =
       sprintf "%s%s%s = (%s)%s;" ms_struct_val accessor ms_member_name tystr param_name
 
 let tfunc_ptrs (tf: Ast.trusted_func) =
-  List.filter (fun (pt, _) -> match pt with
-                                          | Ast.PTVal _ -> false
-                                          | _           -> true) tf.tf_fdecl.plist
+  List.filter (fun (pt, _) -> 
+    match pt with
+      | Ast.PTVal _ -> false
+      | _           -> true) tf.tf_fdecl.plist
 
-let get_ptr_size (pa: Ast.ptr_attr) = 
-  match pa.pa_size.ps_count with
-  | Some v -> (match v with
-               | Ast.ANumber n -> sprintf "%d" n
-               | Ast.AString s -> s)
-  | None -> "0"
+let ufunc_ptrs (tf: Ast.untrusted_func) =
+  List.filter (fun (pt, _) -> 
+    match pt with
+      | Ast.PTVal _ -> false
+      | _           -> true) tf.uf_fdecl.plist
 
-let gen_buf_meta (pd: Ast.pdecl) idx =
+let get_attr_value (a: Ast.attr_value option) = 
+    match a with
+    | Some (Ast.AString s) -> Some s
+    | Some (Ast.ANumber d) -> Some (sprintf "%d" d)
+    | None -> None
+
+let get_ptr_size (pd: Ast.pdecl) = 
+  match pd with 
+  | (Ast.PTPtr (Ast.Ptr pt, pa), pdc) ->
+      (if pa.pa_isstr
+        then sprintf "_len_%s * sizeof(char)" pdc.identifier
+        else 
+          (match (get_attr_value pa.pa_size.ps_count, get_attr_value pa.pa_size.ps_size) with
+            | (Some c, Some s) -> sprintf "%s * %s" c s
+            | (Some c, None) -> sprintf "%s * sizeof(%s)" c (Ast.get_tystr pt)
+            | (None, _) -> sprintf "0")
+      )
+  | _ -> "0"
+
+let indent_helper acc s = if s != "" then acc ^ "\t" ^ s ^ "\n" else acc
+
+let buf_meta_uproxy (pd: Ast.pdecl) idx =
   match pd with
-  | (Ast.PTPtr (Ast.Ptr pt, pa), pdc) -> List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") "" [
-                                sprintf "buf_meta[%d].in_out = %d;" idx (match pa.pa_direction with
-                                                                         | Ast.PtrIn          -> 1
-                                                                         | Ast.PtrOut         -> 2
-                                                                         | Ast.PtrInOut       -> 3
-                                                                         | Ast.PtrNoDirection -> 4);
-                                sprintf "buf_meta[%d].offset = (unsigned char*)(&ms.%s) - (unsigned char*)(&ms);" idx (mk_ms_member_name pdc.identifier);
-                                sprintf "buf_meta[%d].size = %s * sizeof(%s);" idx (get_ptr_size pa) (Ast.get_tystr pt)
-                                ]
+  | (Ast.PTPtr (Ast.Ptr pt, pa), pdc) -> List.fold_left indent_helper "" [
+    sprintf "ms_buf_meta[%d].in_out = %d;" idx 
+      (match pa.pa_direction with
+      | Ast.PtrIn          -> 1
+      | Ast.PtrOut         -> 2
+      | Ast.PtrInOut       -> 3
+      | Ast.PtrNoDirection -> 4);
+      sprintf "ms_buf_meta[%d].offset = (unsigned char*)(&ms.%s) - (unsigned char*)(&ms);" idx (mk_ms_member_name pdc.identifier);
+      sprintf "ms_buf_meta[%d].size = %s;" idx (get_ptr_size pd)]
   | _ -> ""
 
-(* FIXME: indent issue *)
-let gen_meta_trusted (tf: Ast.trusted_func) =
-  let ptrs = tfunc_ptrs tf in
+let buf_meta_tproxy (pd: Ast.pdecl) idx =
+  match pd with
+  | (Ast.PTPtr (Ast.Ptr pt, pa), pdc) -> List.fold_left indent_helper "" [
+    sprintf "ms_buf_meta[%d].in_out = %d;" idx 
+      (match pa.pa_direction with
+      | Ast.PtrIn          -> 1
+      | Ast.PtrOut         -> 2
+      | Ast.PtrInOut       -> 3
+      | Ast.PtrNoDirection -> 4);
+      sprintf "ms_buf_meta[%d].offset = (unsigned char*)(&(ms->%s)) - (unsigned char*)(ms);" idx (mk_ms_member_name pdc.identifier);
+      sprintf "ms_buf_meta[%d].size = %s;" idx (get_ptr_size pd)]
+  | _ -> ""
+
+(* Generate param_meta and buf_meta in trusted source code *)
+let meta_tproxy (tf: Ast.untrusted_func) =
+  let ptrs = ufunc_ptrs tf in
   let ptrs_count = List.length ptrs in
-  let arr = (if (ptrs_count == 0) then "NULL" else "buf_meta") in
-  let buf_decl = (if (ptrs_count == 0) then "" else sprintf "buf_meta_t buf_meta[%d];\n" ptrs_count) in
-  let rec gen_buf_decls res decls idx = 
+  let arr = (if (ptrs_count == 0) then "NULL" else buf_meta_name) in
+  let meta_decl = (if (ptrs_count == 0) then "" else "") in
+  let rec gen_buf_decls res decls idx =
     match res with
       | [] -> decls
-      | hd::tl -> decls ^ gen_buf_meta hd idx ^ gen_buf_decls tl decls (idx + 1)
+      | hd::tl -> decls ^ buf_meta_tproxy hd idx ^ gen_buf_decls tl decls (idx + 1)
   in
   let buf_decls = gen_buf_decls ptrs "" 0 in
-  List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") "" [
-        buf_decl;
-        buf_decls;
-        "param_meta_t ms_param_meta;";
-        "ms_param_meta.ms = &ms;";
-        "ms_param_meta.size = sizeof(ms);";
-        sprintf "ms_param_meta.arr = %s;" arr;
-        sprintf "ms_param_meta.arr_size = %d;" ptrs_count;
-        "ms_param_meta.ret_size = sizeof(int);";
-        "ms_param_meta.ret_offset = 0;";
-        ]
+  List.fold_left indent_helper (buf_decls ^ "\n") [
+    sprintf "%s->ms = ms;" param_meta_name;
+    sprintf "%s->size = sizeof(*ms);" param_meta_name;
+    sprintf "%s->arr = %s;" param_meta_name arr;
+    sprintf "%s->arr_size = %d;" param_meta_name ptrs_count;
+    sprintf "%s->ret_size = 0;" param_meta_name;
+    sprintf "%s->ret_offset = 0;" param_meta_name;
+    ] , meta_decl
+
+(* Generate param_meta and buf_meta in untrusted source code *)
+let meta_uproxy (tf: Ast.trusted_func) =
+  let ptrs = tfunc_ptrs tf in
+  let ptrs_count = List.length ptrs in
+  let arr = (if (ptrs_count == 0) then "NULL" else buf_meta_name) in
+  let buf_decl = (if (ptrs_count == 0) then "" else sprintf "buf_meta_t %s[%d];\n" buf_meta_name ptrs_count) in
+  let rec gen_buf_decls res decls idx =
+    match res with
+      | [] -> decls
+      | hd::tl -> decls ^ buf_meta_uproxy hd idx ^ gen_buf_decls tl decls (idx + 1)
+  in
+  let buf_decls = gen_buf_decls ptrs "" 0 in
+  List.fold_left indent_helper (buf_decl ^ buf_decls ^ "\n") [
+    sprintf "param_meta_t %s;" param_meta_name;
+    sprintf "%s.ms = &ms;" param_meta_name;
+    sprintf "%s.size = sizeof(ms);" param_meta_name;
+    sprintf "%s.arr = %s;" param_meta_name arr;
+    sprintf "%s.arr_size = %d;" param_meta_name ptrs_count;
+    sprintf "%s.ret_size = sizeof(int);" param_meta_name;
+    sprintf "%s.ret_offset = 0;" param_meta_name;
+    ]
 
 (* Generate untrusted proxy code for a given trusted function. *)
 let gen_func_uproxy (tf: Ast.trusted_func) (idx: int) (ec: enclave_content) =
@@ -947,7 +1003,7 @@ let gen_func_uproxy (tf: Ast.trusted_func) (idx: int) (ec: enclave_content) =
 
   (* Normal case - do ECALL with marshaling structure*)
   let ecall_with_ms = sprintf "status = %s(%s, %d, %s, &%s);"
-                              sgx_ecall_fn eid_name idx ocall_table_ptr mk_ms_param_meta_name in
+                              sgx_ecall_fn eid_name idx ocall_table_ptr param_meta_name in
 
   (* Rare case - the trusted function doesn't have parameter nor return value.
    * In this situation, no marshaling structure is required - passing in NULL.
@@ -965,10 +1021,10 @@ let gen_func_uproxy (tf: Ast.trusted_func) (idx: int) (ec: enclave_content) =
         func_body := declare_ms_expr :: !func_body;
         List.iter (fun pd -> func_body := fill_ms_field false pd :: !func_body) fd.Ast.plist;
         (* Add the meta declarations *)
-        func_body := gen_meta_trusted tf :: !func_body;
+        func_body := meta_uproxy tf :: !func_body;
         func_body := ecall_with_ms :: !func_body;
         if fd.Ast.rtype <> Ast.Void then func_body := update_retval :: !func_body;
-          List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") func_open (List.rev !func_body) ^ func_close
+        List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") func_open (List.rev !func_body) ^ func_close
       end
 
 (* Generate an expression to check the pointers. *)
@@ -1947,9 +2003,10 @@ let gen_tproxy_local_vars (plist: Ast.pdecl list) =
     
 
 (* Generate only one ocalloc block required for the trusted proxy. *)
-let gen_ocalloc_block (fname: string) (plist: Ast.pdecl list) (is_switchless: bool) =
+let gen_ocalloc_block (fname: string) (plist: Ast.pdecl list) (is_switchless: bool) ptr_cnt =
   let ms_struct_name = mk_ms_struct_name fname in
   let new_param_list = List.map conv_array_to_ptr plist in
+  let local_meta_block = sprintf "\n\n\tocalloc_size += sizeof(param_meta_t);\n\tocalloc_size += %d * sizeof(buf_meta_t);" ptr_cnt in
   let local_vars_block = sprintf "%s* %s = NULL;\n\tsize_t ocalloc_size = sizeof(%s);\n\tvoid *__tmp = NULL;\n\n" ms_struct_name ms_struct_val ms_struct_name in
   let local_var (ty: Ast.atype) (attr: Ast.ptr_attr) (name: string) =
     if not attr.Ast.pa_chkptr then ""
@@ -2005,7 +2062,7 @@ let gen_ocalloc_block (fname: string) (plist: Ast.pdecl list) (is_switchless: bo
       sprintf "\tocalloc_size -= sizeof(%s);\n" ms_struct_name;
       ]
   in
-  let s1 = List.fold_left (fun acc pd -> acc ^ do_local_var pd) local_vars_block new_param_list in
+  let s1 = List.fold_left (fun acc pd -> acc ^ do_local_var pd) (local_vars_block^local_meta_block) new_param_list in
   let s2 = List.fold_left (fun acc pd -> acc ^ do_count_ocalloc_size pd) (s1 ^ check_enclave_ptr_block) new_param_list in
      List.fold_left (fun acc s -> acc ^ s) s2 do_gen_ocalloc_block
 
@@ -2084,7 +2141,7 @@ let gen_func_tproxy (ufunc: Ast.untrusted_func) (idx: int) =
   let propagate_errno = ufunc.Ast.uf_propagate_errno in
   let func_open = sprintf "%s\n{\n" (gen_tproxy_proto fd) in
   let local_vars = gen_tproxy_local_vars fd.Ast.plist in
-  let ocalloc_ms_struct = gen_ocalloc_block fd.Ast.fname fd.Ast.plist ufunc.Ast.uf_is_switchless in
+  let ocalloc_ms_struct = gen_ocalloc_block fd.Ast.fname fd.Ast.plist ufunc.Ast.uf_is_switchless (List.length (ufunc_ptrs ufunc)) in
   let ocalloc_struct_deep_copy = gen_ocalloc_block_struct_deep_copy fd.Ast.fname fd.Ast.plist in
   let sgx_ocfree_fn = get_sgx_fname SGX_OCFREE ufunc.Ast.uf_is_switchless in
   let gen_ocfree rtype plist =
@@ -2221,19 +2278,24 @@ let gen_func_tproxy (ufunc: Ast.untrusted_func) (idx: int) =
                            "\treturn status;\n}" in
   let sgx_ocall_fn = get_sgx_fname SGX_OCALL ufunc.Ast.uf_is_switchless in
   let ocall_null = sprintf "status = %s(%d, NULL);\n" sgx_ocall_fn idx in
-  let ocall_with_ms = sprintf "status = %s(%d, %s);\n" sgx_ocall_fn idx ms_struct_val in
+  let ocall_with_ms = sprintf "status = %s(%d, %s);\n" sgx_ocall_fn idx param_meta_name in
   let update_retval = sprintf "\tif (%s) *%s = %s;"
                               retval_name retval_name (mk_parm_accessor retval_name) in
+  let meta_assign, meta_decl = meta_tproxy ufunc in
   let func_body = ref [] in
     if (is_naked_func fd) && (propagate_errno = false) then
         sprintf "%s\t%s\t%s%s" func_open local_vars ocall_null "\n\treturn status;\n}"
     else
       begin
+        (*FIXME: `ocalloc_size` *)
         func_body := local_vars :: !func_body;
         func_body := ocalloc_ms_struct:: !func_body;
-        List.iter (fun pd -> func_body := tproxy_fill_ms_field pd ufunc.Ast.uf_is_switchless :: !func_body ) fd.Ast.plist;
+        func_body := meta_decl :: !func_body;
+        List.iter (fun pd -> func_body := tproxy_fill_ms_field pd ufunc.Ast.uf_is_switchless :: !func_body ) (fd.Ast.plist);
         func_body := ocalloc_struct_deep_copy ufunc.Ast.uf_is_switchless :: !func_body;
-        List.iter (fun pd -> func_body := tproxy_fill_structure pd ufunc.Ast.uf_is_switchless:: !func_body) fd.Ast.plist;
+        List.iter (fun pd -> func_body := tproxy_fill_structure pd ufunc.Ast.uf_is_switchless:: !func_body) (fd.Ast.plist);
+        (* Add the meta assignments *)
+        func_body := meta_assign :: !func_body;
         func_body := ocall_with_ms :: !func_body;
         func_body := "if (status == SGX_SUCCESS) {" :: !func_body;
         if fd.Ast.rtype <> Ast.Void then func_body := update_retval :: !func_body;
@@ -2263,8 +2325,6 @@ let gen_ocall_table (ec: enclave_content) =
       ocall_table_name
       nr_ocall
       (if nr_ocall <> 0 then ocall_table else "\t{ NULL },\n")
-
-let additional_struct_defs = [buf_meta_t_def; param_meta_t_def]
 
 (* It generates untrusted code to be saved in a `.c' file. *)
 let gen_untrusted_source (ec: enclave_content) =
@@ -2337,6 +2397,7 @@ let gen_trusted_source (ec: enclave_content) =
     output_string out_chan (ecall_table ^ "\n");
     output_string out_chan (entry_table ^ "\n");
     output_string out_chan "\n";
+    List.iter (fun s -> output_string out_chan (gen_comp_def s ^ "\n")) additional_struct_defs;
     List.iter (fun s -> output_string out_chan (s ^ "\n")) tproxy_list;
     close_out out_chan
 
