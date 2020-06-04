@@ -1,9 +1,3 @@
-/*
-    untrusted {
-        void ocall_print_string([in, string] const char *str);
-    };
-*/
-
 #include "Enclave_t.h"
 
 #include "sgx_trts.h" /* for sgx_ocalloc, sgx_is_outside_enclave */
@@ -252,7 +246,7 @@ typedef struct buf_meta_t {
 	size_t offset;
 	size_t size;
 	int in_out;
-}buf_meta_t;
+} buf_meta_t;
 
 typedef struct param_meta_t {
 	void* ms;     // addr of param struct
@@ -288,10 +282,10 @@ sgx_status_t SGX_CDECL ocall_print_string(const char* str)
 	}
 
 	// add by ice
-	param_meta_t *ms_param_meta = (param_meta_t *)__tmp;
+	param_meta_t* ms_param_meta = (param_meta_t*)__tmp;
 	__tmp = (void *)((size_t)__tmp + sizeof(param_meta_t));
 	ocalloc_size -= sizeof(param_meta_t);
-	buf_meta_t *ms_buf_meta = (buf_meta_t *)__tmp;
+	buf_meta_t* ms_buf_meta = (buf_meta_t*)__tmp;
 	__tmp = (void *)((size_t)__tmp + sizeof(buf_meta_t));
 	ocalloc_size -= sizeof(buf_meta_t);
 	ms = (ms_ocall_print_string_t*)__tmp;

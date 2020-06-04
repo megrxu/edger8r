@@ -225,26 +225,25 @@ let mk_in_var2 name1 name2 = "_in_" ^ name1 ^ "_" ^ name2
 let mk_ocall_table_name enclave_name = "ocall_table_" ^ enclave_name
 
 (* New structures var names *)
+let param_meta_struct = "param_meta_t"
+let buf_meta_struct = "buf_meta_t"
 let param_meta_name = "ms_param_meta"
 let buf_meta_name = "ms_buf_meta"
 (* Additional definitons *)
-let param_meta_t_def : Ast.composite_type = (Ast.StructDef {sname="param_meta_t"; smlist=[
+let param_meta_t_def : Ast.composite_type = (Ast.StructDef {sname=param_meta_struct; smlist=[
   (Ast.PTVal (Ast.Ptr Ast.Void), {identifier="ms"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
-  (Ast.PTVal (Ast.Ptr (Ast.Foreign "buf_meta_t")), {identifier="arr"; array_dims=[]});
+  (Ast.PTVal (Ast.Ptr (Ast.Foreign buf_meta_struct)), {identifier="arr"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="arr_size"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="ret_offset"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="ret_size"; array_dims=[]});
   ]})
-let buf_meta_t_def : Ast.composite_type = (Ast.StructDef {sname="buf_meta_t"; smlist=[
+let buf_meta_t_def : Ast.composite_type = (Ast.StructDef {sname=buf_meta_struct; smlist=[
   (Ast.PTVal Ast.SizeT, {identifier="offset"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
   (Ast.PTVal (Int {ia_signedness= Ast.Signed; ia_shortness=Ast.INone}), {identifier="in_out"; array_dims=[]});
 ]})
-let param_meta_t_decl : Ast.pdecl = (Ast.PTVal (Ast.Foreign "param_meta_t"), {identifier=param_meta_name;array_dims=[]})
-let buf_meta_t_decl : Ast.pdecl = (Ast.PTVal (Ast.Foreign "buf_meta_t"), {identifier=param_meta_name;array_dims=[]})
 let additional_struct_defs = [buf_meta_t_def; param_meta_t_def]
-let additional_struct_decl = [buf_meta_t_decl; param_meta_t_decl]
 
 (* Un-trusted bridge name is prefixed with enclave file short name. *)
 let mk_ubridge_name (enclave_name: string) (funcname: string) =
@@ -948,13 +947,12 @@ let meta_tproxy (tf: Ast.untrusted_func) =
   let ptrs = ufunc_ptrs tf in
   let ptrs_count = List.length ptrs in
   let arr = (if (ptrs_count == 0) then "NULL" else buf_meta_name) in
-  let meta_decl = (if (ptrs_count == 0) then "" else "") in
   let rec gen_buf_decls res decls idx =
     match res with
       | [] -> decls
       | hd::tl -> decls ^ buf_meta_tproxy hd idx ^ gen_buf_decls tl decls (idx + 1)
   in
-  let buf_decls = gen_buf_decls ptrs "" 0 in
+  let buf_decls = gen_buf_decls ptrs "\n" 0 in
   List.fold_left indent_helper (buf_decls ^ "\n") [
     sprintf "%s->ms = ms;" param_meta_name;
     sprintf "%s->size = sizeof(*ms);" param_meta_name;
@@ -962,7 +960,7 @@ let meta_tproxy (tf: Ast.untrusted_func) =
     sprintf "%s->arr_size = %d;" param_meta_name ptrs_count;
     sprintf "%s->ret_size = 0;" param_meta_name;
     sprintf "%s->ret_offset = 0;" param_meta_name;
-    ] , meta_decl
+    ]
 
 (* Generate param_meta and buf_meta in untrusted source code *)
 let meta_uproxy (tf: Ast.trusted_func) =
@@ -1013,6 +1011,7 @@ let gen_func_uproxy (tf: Ast.trusted_func) (idx: int) (ec: enclave_content) =
   in
   let update_retval = sprintf "if (status == SGX_SUCCESS && %s) *%s = %s.%s;"
                               retval_name retval_name ms_struct_val ms_retval_name in
+  let meta_assign = meta_uproxy tf in
   let func_body = ref [] in
     if is_naked_func fd then
       sprintf "%s\t%s\n%s" func_open ecall_null func_close
@@ -1021,7 +1020,7 @@ let gen_func_uproxy (tf: Ast.trusted_func) (idx: int) (ec: enclave_content) =
         func_body := declare_ms_expr :: !func_body;
         List.iter (fun pd -> func_body := fill_ms_field false pd :: !func_body) fd.Ast.plist;
         (* Add the meta declarations *)
-        func_body := meta_uproxy tf :: !func_body;
+        func_body := meta_assign :: !func_body;
         func_body := ecall_with_ms :: !func_body;
         if fd.Ast.rtype <> Ast.Void then func_body := update_retval :: !func_body;
         List.fold_left (fun acc s -> acc ^ "\t" ^ s ^ "\n") func_open (List.rev !func_body) ^ func_close
@@ -2057,6 +2056,12 @@ let gen_ocalloc_block (fname: string) (plist: Ast.pdecl list) (is_switchless: bo
       sprintf "\t\t%s();\n" sgx_ocfree_fn;
       "\t\treturn SGX_ERROR_UNEXPECTED;\n";
       "\t}\n";
+      sprintf "\t%s* %s = (%s*)__tmp;\n" param_meta_struct param_meta_name param_meta_struct;
+      sprintf "\t__tmp = (void *)((size_t)__tmp + sizeof(%s));\n" param_meta_struct;
+      sprintf "\tocalloc_size -= sizeof(%s);\n" param_meta_struct;
+      sprintf "\t%s* %s = (%s*)__tmp;\n" buf_meta_struct buf_meta_name buf_meta_struct;
+      sprintf "\t__tmp = (void *)((size_t)__tmp + sizeof(%s));\n" buf_meta_struct;
+      sprintf "\tocalloc_size -= sizeof(%s);\n" buf_meta_struct;
       sprintf "\t%s = (%s*)__tmp;\n" ms_struct_val ms_struct_name;
       sprintf "\t__tmp = (void *)((size_t)__tmp + sizeof(%s));\n" ms_struct_name;
       sprintf "\tocalloc_size -= sizeof(%s);\n" ms_struct_name;
@@ -2281,7 +2286,7 @@ let gen_func_tproxy (ufunc: Ast.untrusted_func) (idx: int) =
   let ocall_with_ms = sprintf "status = %s(%d, %s);\n" sgx_ocall_fn idx param_meta_name in
   let update_retval = sprintf "\tif (%s) *%s = %s;"
                               retval_name retval_name (mk_parm_accessor retval_name) in
-  let meta_assign, meta_decl = meta_tproxy ufunc in
+  let meta_assign = meta_tproxy ufunc in
   let func_body = ref [] in
     if (is_naked_func fd) && (propagate_errno = false) then
         sprintf "%s\t%s\t%s%s" func_open local_vars ocall_null "\n\treturn status;\n}"
@@ -2290,7 +2295,6 @@ let gen_func_tproxy (ufunc: Ast.untrusted_func) (idx: int) =
         (*FIXME: `ocalloc_size` *)
         func_body := local_vars :: !func_body;
         func_body := ocalloc_ms_struct:: !func_body;
-        func_body := meta_decl :: !func_body;
         List.iter (fun pd -> func_body := tproxy_fill_ms_field pd ufunc.Ast.uf_is_switchless :: !func_body ) (fd.Ast.plist);
         func_body := ocalloc_struct_deep_copy ufunc.Ast.uf_is_switchless :: !func_body;
         List.iter (fun pd -> func_body := tproxy_fill_structure pd ufunc.Ast.uf_is_switchless:: !func_body) (fd.Ast.plist);
