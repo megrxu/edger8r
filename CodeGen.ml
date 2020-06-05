@@ -905,7 +905,7 @@ let get_ptr_size (pd: Ast.pdecl) =
   match pd with 
   | (Ast.PTPtr (Ast.Ptr pt, pa), pdc) ->
       (if pa.pa_isstr
-        then sprintf "_len_%s * sizeof(char)" pdc.identifier
+        then sprintf "_len_%s" pdc.identifier
         else 
           (match (get_attr_value pa.pa_size.ps_count, get_attr_value pa.pa_size.ps_size) with
             | (Some c, Some s) -> sprintf "%s * %s" c s
@@ -939,7 +939,7 @@ let buf_meta_tproxy (pd: Ast.pdecl) idx =
       | Ast.PtrInOut       -> 3
       | Ast.PtrNoDirection -> 4);
       sprintf "ms_buf_meta[%d].offset = (unsigned char*)(&(ms->%s)) - (unsigned char*)(ms);" idx (mk_ms_member_name pdc.identifier);
-      sprintf "ms_buf_meta[%d].size = %s;" idx (get_ptr_size pd)]
+      sprintf "ms_buf_meta[%d].size = _len_%s;" idx pdc.identifier]
   | _ -> ""
 
 (* Generate param_meta and buf_meta in trusted source code *)
@@ -958,7 +958,7 @@ let meta_tproxy (tf: Ast.untrusted_func) =
     sprintf "%s->size = sizeof(*ms);" param_meta_name;
     sprintf "%s->arr = %s;" param_meta_name arr;
     sprintf "%s->arr_size = %d;" param_meta_name ptrs_count;
-    sprintf "%s->ret_size = 0;" param_meta_name;
+    sprintf "%s->ret_size = sizeof(int);" param_meta_name;
     sprintf "%s->ret_offset = 0;" param_meta_name;
     ]
 
@@ -2005,7 +2005,7 @@ let gen_tproxy_local_vars (plist: Ast.pdecl list) =
 let gen_ocalloc_block (fname: string) (plist: Ast.pdecl list) (is_switchless: bool) ptr_cnt =
   let ms_struct_name = mk_ms_struct_name fname in
   let new_param_list = List.map conv_array_to_ptr plist in
-  let local_meta_block = sprintf "\n\n\tocalloc_size += sizeof(param_meta_t);\n\tocalloc_size += %d * sizeof(buf_meta_t);" ptr_cnt in
+  let local_meta_block = sprintf "\n\n\tocalloc_size += sizeof(param_meta_t);\n\tocalloc_size += %d * sizeof(buf_meta_t);\n" ptr_cnt in
   let local_vars_block = sprintf "%s* %s = NULL;\n\tsize_t ocalloc_size = sizeof(%s);\n\tvoid *__tmp = NULL;\n\n" ms_struct_name ms_struct_val ms_struct_name in
   let local_var (ty: Ast.atype) (attr: Ast.ptr_attr) (name: string) =
     if not attr.Ast.pa_chkptr then ""
@@ -2060,8 +2060,8 @@ let gen_ocalloc_block (fname: string) (plist: Ast.pdecl list) (is_switchless: bo
       sprintf "\t__tmp = (void *)((size_t)__tmp + sizeof(%s));\n" param_meta_struct;
       sprintf "\tocalloc_size -= sizeof(%s);\n" param_meta_struct;
       sprintf "\t%s* %s = (%s*)__tmp;\n" buf_meta_struct buf_meta_name buf_meta_struct;
-      sprintf "\t__tmp = (void *)((size_t)__tmp + sizeof(%s));\n" buf_meta_struct;
-      sprintf "\tocalloc_size -= sizeof(%s);\n" buf_meta_struct;
+      sprintf "\t__tmp = (void *)((size_t)__tmp + %d * sizeof(%s));\n" ptr_cnt buf_meta_struct;
+      sprintf "\tocalloc_size -= %d * sizeof(%s);\n" ptr_cnt buf_meta_struct;
       sprintf "\t%s = (%s*)__tmp;\n" ms_struct_val ms_struct_name;
       sprintf "\t__tmp = (void *)((size_t)__tmp + sizeof(%s));\n" ms_struct_name;
       sprintf "\tocalloc_size -= sizeof(%s);\n" ms_struct_name;
@@ -2146,7 +2146,8 @@ let gen_func_tproxy (ufunc: Ast.untrusted_func) (idx: int) =
   let propagate_errno = ufunc.Ast.uf_propagate_errno in
   let func_open = sprintf "%s\n{\n" (gen_tproxy_proto fd) in
   let local_vars = gen_tproxy_local_vars fd.Ast.plist in
-  let ocalloc_ms_struct = gen_ocalloc_block fd.Ast.fname fd.Ast.plist ufunc.Ast.uf_is_switchless (List.length (ufunc_ptrs ufunc)) in
+  let ptr_cnt = (List.length (ufunc_ptrs ufunc)) in
+  let ocalloc_ms_struct = gen_ocalloc_block fd.Ast.fname fd.Ast.plist ufunc.Ast.uf_is_switchless ptr_cnt in
   let ocalloc_struct_deep_copy = gen_ocalloc_block_struct_deep_copy fd.Ast.fname fd.Ast.plist in
   let sgx_ocfree_fn = get_sgx_fname SGX_OCFREE ufunc.Ast.uf_is_switchless in
   let gen_ocfree rtype plist =
