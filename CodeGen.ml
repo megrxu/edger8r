@@ -942,9 +942,18 @@ let buf_meta_tproxy (pd: Ast.pdecl) idx =
       sprintf "ms_buf_meta[%d].size = _len_%s;" idx pdc.identifier]
   | _ -> ""
 
-(* Generate param_meta and buf_meta in trusted source code *)
-let meta_tproxy (tf: Ast.untrusted_func) =
-  let ptrs = ufunc_ptrs tf in
+let rtype_size_uf (uf: Ast.untrusted_func) =
+  match uf.uf_fdecl.rtype with
+  | Ast.Void -> "0"
+  | ty -> sprintf "sizeof(%s)" (Ast.get_tystr ty)
+let rtype_size_tf (tf: Ast.trusted_func) =
+  match tf.tf_fdecl.rtype with
+  | Ast.Void -> "0"
+  | ty -> sprintf "sizeof(%s)" (Ast.get_tystr ty)
+
+  (* Generate param_meta and buf_meta in trusted source code *)
+let meta_tproxy (uf: Ast.untrusted_func) =
+  let ptrs = ufunc_ptrs uf in
   let ptrs_count = List.length ptrs in
   let arr = (if (ptrs_count == 0) then "NULL" else buf_meta_name) in
   let rec gen_buf_decls res decls idx =
@@ -958,7 +967,7 @@ let meta_tproxy (tf: Ast.untrusted_func) =
     sprintf "%s->size = sizeof(*ms);" param_meta_name;
     sprintf "%s->arr = %s;" param_meta_name arr;
     sprintf "%s->arr_size = %d;" param_meta_name ptrs_count;
-    sprintf "%s->ret_size = sizeof(int);" param_meta_name;
+    sprintf "%s->ret_size = %s;" param_meta_name (rtype_size_uf uf);
     sprintf "%s->ret_offset = 0;" param_meta_name;
     ]
 
@@ -980,7 +989,7 @@ let meta_uproxy (tf: Ast.trusted_func) =
     sprintf "%s.size = sizeof(ms);" param_meta_name;
     sprintf "%s.arr = %s;" param_meta_name arr;
     sprintf "%s.arr_size = %d;" param_meta_name ptrs_count;
-    sprintf "%s.ret_size = sizeof(int);" param_meta_name;
+    sprintf "%s.ret_size = %s;" param_meta_name (rtype_size_tf tf);
     sprintf "%s.ret_offset = 0;" param_meta_name;
     ]
 
