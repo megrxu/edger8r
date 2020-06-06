@@ -29,12 +29,15 @@
 #
 #
 
+include ../../../buildenv.mk
+
 OCAML_VERSION_MAJOR=$(shell ocamlopt -version | head -n  1 | cut -d . -f 1)
 OCAML_VERSION_MINOR=$(shell ocamlopt -version | head -n  1 | cut -d . -f 2)
 OCAML_VERSION=$(OCAML_VERSION_MAJOR)$(OCAML_VERSION_MINOR)
 
 .PHONY: all
-all: build
+all: build | $(BUILD_DIR)
+	@$(CP) $(CUR_DIR)/_build/Edger8r.native $(BUILD_DIR)/sgx_edger8r
 
 .PHONY: build
 build:
@@ -45,10 +48,13 @@ else
 	ocamlbuild -cflags -ccopt,-fpie -lflags -runtime-variant,_pic,-ccopt,-pie,-ccopt -lflag "-Wl,-z,now"  -no-links -libs str,unix Edger8r.native
 endif
 
+$(BUILD_DIR):
+	@$(MKDIR) $@
+
 .PHONY:
 clean:
 	@ocamlbuild Edger8r.native -clean
-	@$(RM) _build
+	@$(RM) $(BUILD_DIR)/sgx_edger8r
 
 .ONESHELL:
 naive:
