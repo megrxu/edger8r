@@ -901,24 +901,43 @@ let get_attr_value (a: Ast.attr_value option) =
     | Some (Ast.ANumber d) -> Some (sprintf "%d" d)
     | None -> None
 
+let get_typename (pt: Ast.atype) =
+  match pt with
+  | Ast.Struct name
+  | Ast.Enum name
+  | Ast.Foreign name
+  | Ast.Union name -> name
+  | pt -> Ast.get_tystr pt
+
 let get_ptr_size (pd: Ast.pdecl) = 
   match pd with 
+  (* Basic pointers of atype *)
   | (Ast.PTPtr (Ast.Ptr pt, pa), pdc) ->
       (if pa.pa_isstr
-        then sprintf "_len_%s" pdc.identifier
+        then sprintf "%s ? strlen(%s) + 1 : 0" pdc.identifier pdc.identifier
         else 
           (match (get_attr_value pa.pa_size.ps_count, get_attr_value pa.pa_size.ps_size) with
             | (Some c, Some s) -> sprintf "%s * %s" c s
-            | (Some c, None) -> sprintf "%s * sizeof(%s)" c (Ast.get_tystr pt)
-            | (None, _) -> sprintf "0")
+            | (Some c, None) -> sprintf "%s * sizeof(%s)" c (get_typename pt)
+            | (None, Some s) -> sprintf "%s" s
+            | (None, None) -> sprintf "sizeof(%s)" (get_typename pt))
       )
+  (* Other pointers *)
+  | (Ast.PTPtr (pt, pa), pdc) ->
+          (match (get_attr_value pa.pa_size.ps_count, get_attr_value pa.pa_size.ps_size) with
+            | (Some c, Some s) -> sprintf "%s * %s" c s
+            | (Some c, None) -> sprintf "%s * sizeof(%s)" c (get_typename pt)
+            | (None, Some s) -> sprintf "%s" s
+            | (None, None) -> (if (List.length pdc.array_dims <> 0)
+                               then sprintf "%d * sizeof(%s)" (List.hd pdc.array_dims) (get_typename pt) 
+                               else sprintf "sizeof(%s)" (get_typename pt)))
   | _ -> "0"
 
 let indent_helper acc s = if s != "" then acc ^ "\t" ^ s ^ "\n" else acc
 
 let buf_meta_uproxy (pd: Ast.pdecl) idx =
   match pd with
-  | (Ast.PTPtr (Ast.Ptr pt, pa), pdc) -> List.fold_left indent_helper "" [
+  | (Ast.PTPtr (_, pa), pdc) -> List.fold_left indent_helper "" [
     sprintf "ms_buf_meta[%d].in_out = %d;" idx 
       (match pa.pa_direction with
       | Ast.PtrIn          -> 1
@@ -931,7 +950,7 @@ let buf_meta_uproxy (pd: Ast.pdecl) idx =
 
 let buf_meta_tproxy (pd: Ast.pdecl) idx =
   match pd with
-  | (Ast.PTPtr (Ast.Ptr pt, pa), pdc) -> List.fold_left indent_helper "" [
+  | (Ast.PTPtr (_, pa), pdc) -> List.fold_left indent_helper "" [
     sprintf "ms_buf_meta[%d].in_out = %d;" idx 
       (match pa.pa_direction with
       | Ast.PtrIn          -> 1
@@ -939,7 +958,7 @@ let buf_meta_tproxy (pd: Ast.pdecl) idx =
       | Ast.PtrInOut       -> 3
       | Ast.PtrNoDirection -> 4);
       sprintf "ms_buf_meta[%d].offset = (unsigned char*)(&(ms->%s)) - (unsigned char*)(ms);" idx (mk_ms_member_name pdc.identifier);
-      sprintf "ms_buf_meta[%d].size = _len_%s;" idx pdc.identifier]
+      sprintf "ms_buf_meta[%d].size = %s;" idx (get_ptr_size pd)]
   | _ -> ""
 
 let rtype_size_uf (uf: Ast.untrusted_func) =
