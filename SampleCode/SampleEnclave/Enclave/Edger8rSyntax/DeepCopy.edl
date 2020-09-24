@@ -1,0 +1,15 @@
+enclave {
+    struct struct_deep_foo_t {
+        uint32_t count;
+        size_t size;
+        [count = count, size = size] uint64_t* buf;
+    };
+
+    trusted {
+        public void test_ecall_deep_copy([in, count = 2] struct struct_deep_foo_t * ptr);
+    };
+
+    untrusted {
+        void test_ocall_deep_copy([in, count = 2] struct struct_deep_foo_t * ptr);
+    };
+};
