@@ -227,8 +227,10 @@ let mk_ocall_table_name enclave_name = "ocall_table_" ^ enclave_name
 (* New structures var names *)
 let param_meta_struct = "param_meta_t"
 let buf_meta_struct = "buf_meta_t"
+let deep_meta_struct = "struct_deep_meta_t"
 let param_meta_name = "ms_param_meta"
 let buf_meta_name = "ms_buf_meta"
+let deep_meta_name = "ms_struct_deep_meta"
 (* Additional definitons *)
 let param_meta_t_def : Ast.composite_type = (Ast.StructDef {sname=param_meta_struct; smlist=[
   (Ast.PTVal (Ast.Ptr Ast.Void), {identifier="ms"; array_dims=[]});
@@ -242,8 +244,20 @@ let buf_meta_t_def : Ast.composite_type = (Ast.StructDef {sname=buf_meta_struct;
   (Ast.PTVal Ast.SizeT, {identifier="offset"; array_dims=[]});
   (Ast.PTVal Ast.SizeT, {identifier="size"; array_dims=[]});
   (Ast.PTVal (Int {ia_signedness= Ast.Signed; ia_shortness=Ast.INone}), {identifier="in_out"; array_dims=[]});
+  (Ast.PTVal (Ast.Ptr (Ast.Foreign deep_meta_struct)), {identifier="struct_deep"; array_dims=[]});
 ]})
-let additional_struct_defs = [buf_meta_t_def; param_meta_t_def]
+let deep_copy_meta_t_def : Ast.composite_type = (
+  Ast.StructDef {
+    sname=deep_meta_struct;
+    smlist=[
+      (Ast.PTVal (Ast.Ptr Ast.SizeT), {identifier="pointer_offset_arr"; array_dims=[]});
+      (Ast.PTVal Ast.SizeT, {identifier="pointer_offset_arr_size"; array_dims=[]});
+      (Ast.PTVal (Ast.Ptr (Ast.Ptr Ast.SizeT)), {identifier="size_arr"; array_dims=[]});
+      (Ast.PTVal Ast.SizeT, {identifier="struct_count"; array_dims=[]});
+    ]
+  }
+)
+let additional_struct_defs = [deep_copy_meta_t_def; buf_meta_t_def; param_meta_t_def;]
 
 (* Un-trusted bridge name is prefixed with enclave file short name. *)
 let mk_ubridge_name (enclave_name: string) (funcname: string) =
@@ -372,13 +386,13 @@ let defined_structure = ref []
 let is_structure_defined s = List.exists (fun (( i, _ ): (Ast.struct_def * bool)) -> i.Ast.sname = s) !defined_structure
 let get_struct_def s = List.find (fun (( i, _ ): (Ast.struct_def * bool)) -> i.Ast.sname = s) !defined_structure
 
-let is_structure_deep_copy (s:Ast.struct_def) = 
-    let is_deep_copy (pd: Ast.pdecl) = 
+let is_deep_copy (pd: Ast.pdecl) = 
       let (pt, _)    = pd in
       match pt with
         | Ast.PTVal _      -> false
         | Ast.PTPtr (_, attr) -> if attr.Ast.pa_size = Ast.empty_ptr_size then false else true
-    in
+
+let is_structure_deep_copy (s:Ast.struct_def) = 
     List.exists is_deep_copy s.Ast.smlist
 
 
@@ -895,6 +909,17 @@ let ufunc_ptrs (tf: Ast.untrusted_func) =
       | Ast.PTVal _ -> false
       | _           -> true) tf.uf_fdecl.plist
 
+let is_struct_ptr = (fun (pt, _) -> 
+    match pt with
+      | Ast.PTPtr (Ast.Struct _, _) -> true
+      | _ -> false)
+
+let ufunc_struct_ptrs (tf: Ast.untrusted_func) =
+  List.filter is_struct_ptr tf.uf_fdecl.plist
+
+let tfunc_struct_ptrs (tf: Ast.trusted_func) =
+  List.filter is_struct_ptr tf.tf_fdecl.plist
+
 let get_attr_value (a: Ast.attr_value option) = 
     match a with
     | Some (Ast.AString s) -> Some s
@@ -945,7 +970,8 @@ let buf_meta_uproxy (pd: Ast.pdecl) idx =
       | Ast.PtrInOut       -> 3
       | Ast.PtrNoDirection -> 4);
       sprintf "ms_buf_meta[%d].offset = (unsigned char*)(&ms.%s) - (unsigned char*)(&ms);" idx (mk_ms_member_name pdc.identifier);
-      sprintf "ms_buf_meta[%d].size = %s;" idx (get_ptr_size pd)]
+      sprintf "ms_buf_meta[%d].size = %s;" idx (get_ptr_size pd);
+      sprintf "ms_buf_meta[%d].struct_deep = NULL;" idx ]
   | _ -> ""
 
 let buf_meta_tproxy (pd: Ast.pdecl) idx =
@@ -958,7 +984,8 @@ let buf_meta_tproxy (pd: Ast.pdecl) idx =
       | Ast.PtrInOut       -> 3
       | Ast.PtrNoDirection -> 4);
       sprintf "ms_buf_meta[%d].offset = (unsigned char*)(&(ms->%s)) - (unsigned char*)(ms);" idx (mk_ms_member_name pdc.identifier);
-      sprintf "ms_buf_meta[%d].size = %s;" idx (get_ptr_size pd)]
+      sprintf "ms_buf_meta[%d].size = %s;" idx (get_ptr_size pd);
+      sprintf "ms_buf_meta[%d].struct_deep = &%s[%d];" idx deep_meta_name idx]
   | _ -> ""
 
 let rtype_size_uf (uf: Ast.untrusted_func) =
@@ -2030,10 +2057,10 @@ let gen_tproxy_local_vars (plist: Ast.pdecl list) =
     
 
 (* Generate only one ocalloc block required for the trusted proxy. *)
-let gen_ocalloc_block (fname: string) (plist: Ast.pdecl list) (is_switchless: bool) ptr_cnt =
+let gen_ocalloc_block (fname: string) (plist: Ast.pdecl list) (is_switchless: bool) ptr_cnt deep_cnt =
   let ms_struct_name = mk_ms_struct_name fname in
   let new_param_list = List.map conv_array_to_ptr plist in
-  let local_meta_block = sprintf "\n\n\tocalloc_size += sizeof(param_meta_t);\n\tocalloc_size += %d * sizeof(buf_meta_t);\n" ptr_cnt in
+  let local_meta_block = sprintf "\n\n\tocalloc_size += sizeof(param_meta_t);\n\tocalloc_size += %d * sizeof(buf_meta_t);\n\tocalloc_size += %d * sizeof(struct_deep_meta_t);\n" ptr_cnt deep_cnt in
   let local_vars_block = sprintf "%s* %s = NULL;\n\tsize_t ocalloc_size = sizeof(%s);\n\tvoid *__tmp = NULL;\n\n" ms_struct_name ms_struct_val ms_struct_name in
   let local_var (ty: Ast.atype) (attr: Ast.ptr_attr) (name: string) =
     if not attr.Ast.pa_chkptr then ""
@@ -2090,6 +2117,9 @@ let gen_ocalloc_block (fname: string) (plist: Ast.pdecl list) (is_switchless: bo
       sprintf "\t%s* %s = (%s*)__tmp;\n" buf_meta_struct buf_meta_name buf_meta_struct;
       sprintf "\t__tmp = (void *)((size_t)__tmp + %d * sizeof(%s));\n" ptr_cnt buf_meta_struct;
       sprintf "\tocalloc_size -= %d * sizeof(%s);\n" ptr_cnt buf_meta_struct;
+      sprintf "\t%s* %s = (%s*)__tmp;\n" deep_meta_struct deep_meta_name deep_meta_struct;
+      sprintf "\t__tmp = (void *)((size_t)__tmp + %d * sizeof(%s));\n" deep_cnt deep_meta_struct;
+      sprintf "\tocalloc_size -= %d * sizeof(%s));\n" deep_cnt deep_meta_struct;
       sprintf "\t%s = (%s*)__tmp;\n" ms_struct_val ms_struct_name;
       sprintf "\t__tmp = (void *)((size_t)__tmp + sizeof(%s));\n" ms_struct_name;
       sprintf "\tocalloc_size -= sizeof(%s);\n" ms_struct_name;
@@ -2175,7 +2205,8 @@ let gen_func_tproxy (ufunc: Ast.untrusted_func) (idx: int) =
   let func_open = sprintf "%s\n{\n" (gen_tproxy_proto fd) in
   let local_vars = gen_tproxy_local_vars fd.Ast.plist in
   let ptr_cnt = (List.length (ufunc_ptrs ufunc)) in
-  let ocalloc_ms_struct = gen_ocalloc_block fd.Ast.fname fd.Ast.plist ufunc.Ast.uf_is_switchless ptr_cnt in
+  let deep_cnt = (List.length (List.filter is_deep_copy ufunc.uf_fdecl.plist)) in
+  let ocalloc_ms_struct = gen_ocalloc_block fd.Ast.fname fd.Ast.plist ufunc.Ast.uf_is_switchless ptr_cnt deep_cnt in
   let ocalloc_struct_deep_copy = gen_ocalloc_block_struct_deep_copy fd.Ast.fname fd.Ast.plist in
   let sgx_ocfree_fn = get_sgx_fname SGX_OCFREE ufunc.Ast.uf_is_switchless in
   let gen_ocfree rtype plist =
