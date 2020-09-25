@@ -3,6 +3,7 @@ enclave {
         uint32_t count;
         size_t size;
         [count = count, size = size] uint64_t* buf;
+        // [count = count, size = size] uint64_t* buf2;
     };
 
     trusted {
