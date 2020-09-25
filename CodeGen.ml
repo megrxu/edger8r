@@ -392,6 +392,12 @@ let is_deep_copy (pd: Ast.pdecl) =
         | Ast.PTVal _      -> false
         | Ast.PTPtr (_, attr) -> if attr.Ast.pa_size = Ast.empty_ptr_size then false else true
 
+let is_type_deep_copy (pd: Ast.pdecl) = 
+      let (pt, _) = pd in
+      match pt with
+        | Ast.PTPtr (Ast.Ptr(Ast.Struct(_)), attr) -> is_deep_copy pd
+        | _ -> false
+
 let is_structure_deep_copy (s:Ast.struct_def) = 
     List.exists is_deep_copy s.Ast.smlist
 
@@ -480,6 +486,38 @@ let invoke_if_struct (ty: Ast.atype) (param_direction: Ast.ptr_direction) (var_n
                       | Ast.PTPtr (member_ty, member_attr) ->
                         if member_attr.Ast.pa_size <> Ast.empty_ptr_size then
                           acc ^ generator param_direction struct_type var_name member_ty member_attr declr
+                        else acc 
+                    ) "" struct_def.Ast.smlist
+                in
+                if body = "" then ""
+                else (pre struct_type var_name) ^ body ^ post
+              else ""
+            else ""
+       | _ -> ""
+
+let invoke_if_struct_with_filter (ty: Ast.atype) (param_direction: Ast.ptr_direction) (var_name: string)
+    (pre:string -> string -> string)
+    (meta: Ast.atype -> bool )
+    (generator: int -> Ast.ptr_direction -> string -> string -> Ast.atype -> Ast.ptr_attr -> Ast.declarator -> string )
+    (post:string)=
+    let cnt = ref (-1) in
+    match ty with
+        Ast.Ptr(Ast.Struct(struct_type)) ->
+            if is_structure_defined struct_type then
+              let (struct_def, deep_copy)= get_struct_def struct_type
+              in
+              if deep_copy then
+                let body = 
+                  List.fold_left (
+                    fun acc (pty, declr) ->
+                     match pty with
+                        Ast.PTVal _          -> acc
+                      | Ast.PTPtr (member_ty, member_attr) ->
+                        if member_attr.Ast.pa_size <> Ast.empty_ptr_size then
+                          begin
+                          if meta member_ty then cnt := !cnt + 1;
+                          acc ^ generator !cnt param_direction struct_type var_name member_ty member_attr declr
+                          end
                         else acc 
                     ) "" struct_def.Ast.smlist
                 in
@@ -974,7 +1012,7 @@ let buf_meta_uproxy (pd: Ast.pdecl) idx =
       sprintf "ms_buf_meta[%d].struct_deep = NULL;" idx ]
   | _ -> ""
 
-let buf_meta_tproxy (pd: Ast.pdecl) idx =
+let buf_meta_tproxy (pd: Ast.pdecl) idx (is_deep: bool) (deep_idx: int) =
   match pd with
   | (Ast.PTPtr (_, pa), pdc) -> List.fold_left indent_helper "" [
     sprintf "ms_buf_meta[%d].in_out = %d;" idx 
@@ -985,7 +1023,7 @@ let buf_meta_tproxy (pd: Ast.pdecl) idx =
       | Ast.PtrNoDirection -> 4);
       sprintf "ms_buf_meta[%d].offset = (unsigned char*)(&(ms->%s)) - (unsigned char*)(ms);" idx (mk_ms_member_name pdc.identifier);
       sprintf "ms_buf_meta[%d].size = %s;" idx (get_ptr_size pd);
-      sprintf "ms_buf_meta[%d].struct_deep = &%s[%d];" idx deep_meta_name idx]
+      sprintf "ms_buf_meta[%d].struct_deep = %s;" idx (if is_deep then sprintf "&%s[%d]" deep_meta_name deep_idx else "NULL")]
   | _ -> ""
 
 let rtype_size_uf (uf: Ast.untrusted_func) =
@@ -1002,12 +1040,14 @@ let meta_tproxy (uf: Ast.untrusted_func) =
   let ptrs = ufunc_ptrs uf in
   let ptrs_count = List.length ptrs in
   let arr = (if (ptrs_count == 0) then "NULL" else buf_meta_name) in
-  let rec gen_buf_decls res decls idx =
+  let rec gen_buf_decls res decls idx deep_idx =
     match res with
       | [] -> decls
-      | hd::tl -> decls ^ buf_meta_tproxy hd idx ^ gen_buf_decls tl decls (idx + 1)
+      | hd::tl ->
+      let is_deep = is_type_deep_copy hd in 
+        decls ^ buf_meta_tproxy hd idx is_deep deep_idx ^ gen_buf_decls tl decls (idx + 1) (if is_deep then deep_idx + 1 else deep_idx)
   in
-  let buf_decls = gen_buf_decls ptrs "\n" 0 in
+  let buf_decls = gen_buf_decls ptrs "\n" 0 0 in
   List.fold_left indent_helper (buf_decls ^ "\n") [
     sprintf "%s->ms = ms;" param_meta_name;
     sprintf "%s->size = sizeof(*ms);" param_meta_name;
@@ -1303,7 +1343,7 @@ let gen_struct_ptr_direction_pre_calculate (param_direction: Ast.ptr_direction) 
     let gen_tmp_var_for_out = 
         match param_direction with
             Ast.PtrInOut ->
-			[
+      [
                     sprintf "if (ADD_ASSIGN_OVERFLOW(_%s_malloc_size, sizeof(void*) + sizeof(size_t))) {" struct_name;
                     "\tstatus = SGX_ERROR_INVALID_PARAMETER;";
                     "\tgoto err;";
@@ -1438,13 +1478,13 @@ let gen_parm_ptr_direction_pre (plist: Ast.pdecl list) =
                       else []
                     else []
               | _ -> 
-				  [
-				  sprintf "\tif ( %s %% sizeof(*%s) != 0)" len_var tmp_ptr_name;
-				  "\t{";
-				  "\t\tstatus = SGX_ERROR_INVALID_PARAMETER;";
-				  "\t\tgoto err;";
-				  "\t}";
-				  ]
+          [
+          sprintf "\tif ( %s %% sizeof(*%s) != 0)" len_var tmp_ptr_name;
+          "\t{";
+          "\t\tstatus = SGX_ERROR_INVALID_PARAMETER;";
+          "\t\tgoto err;";
+          "\t}";
+          ]
       in
       match attr.Ast.pa_direction with
           Ast.PtrIn | Ast.PtrInOut ->
@@ -1876,7 +1916,7 @@ let gen_func_tbridge (fd: Ast.func_decl) (dummy_var: string) =
         (gen_parm_ptr_free_post fd.Ast.plist)
         func_close
 
-let tproxy_fill_ms_field (pd: Ast.pdecl) (is_ocall_switchless: bool) =
+let tproxy_fill_ms_field deep_cnt deep_idx (pd: Ast.pdecl) (is_ocall_switchless: bool) =
   let (pt, declr)   = pd in
   let name          = declr.Ast.identifier in
   let len_var       = mk_len_var name in
@@ -1887,6 +1927,7 @@ let tproxy_fill_ms_field (pd: Ast.pdecl) (is_ocall_switchless: bool) =
       | Ast.PTPtr(ty, attr) ->
               let is_ary = (Ast.is_array declr || attr.Ast.pa_isary) in
               let tystr = sprintf "%s%s%s" (if is_const_ptr pt then "const " else"")(get_param_tystr pt) (if is_ary then "*" else "") in
+              let deep_struct_ptr_defs = ref [] in
               if not attr.Ast.pa_chkptr then (* [user_check] specified *) 
                 if is_ary then sprintf "%s = SGX_CAST(%s, %s);" parm_accessor tystr name
                 else sprintf "%s = %s;" parm_accessor name
@@ -1896,15 +1937,18 @@ let tproxy_fill_ms_field (pd: Ast.pdecl) (is_ocall_switchless: bool) =
                     Ast.Ptr(Ast.Void) | Ast.Ptr(Ast.Foreign(_)) | Ast.Foreign(_)  -> []
                    | Ast.Ptr(Ast.Struct(struct_type)) ->
                             if is_structure_defined struct_type then
-                              let (_, deep_copy)= get_struct_def struct_type
+                              let (struct_def, deep_copy)= get_struct_def struct_type
                               in
                               if deep_copy then
-                                [
+                                begin
+                                  deep_struct_ptr_defs := (List.filter is_deep_copy struct_def.Ast.smlist);
+                                  [
                                    sprintf "\tif (%s %% sizeof(*%s) != 0) {" len_var name;
                                    sprintf "\t\t%s();" sgx_ocfree_fn;
                                    "\t\treturn SGX_ERROR_INVALID_PARAMETER;";
                                    "\t}";
-                                ]
+                                  ]
+                                end
                                 else []
                             else []
                    | _ ->
@@ -1914,6 +1958,39 @@ let tproxy_fill_ms_field (pd: Ast.pdecl) (is_ocall_switchless: bool) =
                        "\t\treturn SGX_ERROR_INVALID_PARAMETER;";
                        "\t}";
                     ]
+                in
+                let cnt_var = sprintf "_count_%s" name in
+                (* TODO: idx *)
+                let deep_offset_assign = List.mapi
+                                            (fun idx (_, deco) -> 
+                                                sprintf "_offset_arr[%d][%d] = ((size_t)&((%s)0)->%s);" deep_idx idx tystr deco.Ast.identifier) 
+                                            !deep_struct_ptr_defs in
+                let deep_struct_ocalloc = 
+                  [
+                     sprintf "\t__tmp = (void *)((size_t)__tmp + %s);" len_var;
+                     sprintf "\tocalloc_size -= %s;" len_var;
+                     "} else {";
+                     sprintf "\t%s = NULL;" parm_accessor;
+                     "}";
+                     sprintf "size_t %s = %s / sizeof(*(ms->ms_%s));" cnt_var len_var name;
+                     sprintf "if (%s != NULL && %s != 0) {" name len_var;
+                     sprintf "\tocalloc_size += %d * sizeof(size_t);" 1;
+                     sprintf "\tocalloc_size += %s * %d * sizeof(size_t);" cnt_var 1;
+                     "}";
+                     "__tmp = sgx_ocalloc(ocalloc_size);";
+                     "if (__tmp == NULL) {\n\t\tsgx_ocfree();\n\t\treturn SGX_ERROR_UNEXPECTED;\n\t}";
+                     sprintf "_size_arr[%d] = (size_t**)__tmp;" deep_idx;
+                     sprintf "__tmp = (void *)((size_t)__tmp + %s * %d * sizeof(size_t);" cnt_var deep_cnt;
+                     sprintf "ocalloc_size -= %s * %d * sizeof(size_t);" cnt_var deep_cnt;
+                     sprintf "_offset_arr[%d] = (size_t*)__tmp;" deep_idx;
+                     sprintf "__tmp = (void *)((size_t)__tmp + %d * sizeof(size_t);" deep_cnt;
+                     sprintf "ocalloc_size -= %d * sizeof(size_t);" deep_cnt;
+                  ] @ deep_offset_assign @ [
+                     sprintf "ms_struct_deep_mata[%d].pointer_offset_arr = _offset_arr[%d];" deep_idx deep_idx;
+                     sprintf "ms_struct_deep_mata[%d].pointer_offset_arr_size = %d;" deep_idx deep_cnt;
+                     sprintf "ms_struct_deep_mata[%d].struct_count = %s;" deep_idx cnt_var;
+                     sprintf "ms_struct_deep_mata[%d].size_arr = _size_arr[%d];" deep_idx deep_idx;
+                  ]
                 in
                 match attr.Ast.pa_direction with
                   Ast.PtrOut ->
@@ -1953,21 +2030,16 @@ let tproxy_fill_ms_field (pd: Ast.pdecl) (is_ocall_switchless: bool) =
                     in List.fold_left (fun acc s -> acc ^ s ^ "\n\t") "" code_template
                 | _ ->
                     let code_template =
-					  [sprintf "if (%s != NULL) {" name;
-					   sprintf "\t%s = (%s)__tmp;" parm_accessor tystr;
+            [sprintf "if (%s != NULL) {" name;
+             sprintf "\t%s = (%s)__tmp;" parm_accessor tystr;
                       ]
                       @ check_size @
                       [
-					   sprintf "\tif (memcpy_s(__tmp, ocalloc_size, %s, %s)) {"  name len_var;
-					   sprintf "\t\t%s();" sgx_ocfree_fn;
-					   "\t\treturn SGX_ERROR_UNEXPECTED;";
-					   "\t}";
-					   sprintf "\t__tmp = (void *)((size_t)__tmp + %s);" len_var;
-					   sprintf "\tocalloc_size -= %s;" len_var;
-					   "} else {";
-					   sprintf "\t%s = NULL;" parm_accessor;
-					   "}"
-					  ]
+             sprintf "\tif (memcpy_s(__tmp, ocalloc_size, %s, %s)) {"  name len_var;
+             sprintf "\t\t%s();" sgx_ocfree_fn;
+             "\t\treturn SGX_ERROR_UNEXPECTED;";
+             "\t}";
+            ] @ deep_struct_ocalloc
                     in List.fold_left (fun acc s -> acc ^ s ^ "\n\t") "" code_template
 
 (* Attach data pointed by structure member pointer at the end of ms. *)
@@ -2060,7 +2132,8 @@ let gen_tproxy_local_vars (plist: Ast.pdecl list) =
 let gen_ocalloc_block (fname: string) (plist: Ast.pdecl list) (is_switchless: bool) ptr_cnt deep_cnt =
   let ms_struct_name = mk_ms_struct_name fname in
   let new_param_list = List.map conv_array_to_ptr plist in
-  let local_meta_block = sprintf "\n\n\tocalloc_size += sizeof(param_meta_t);\n\tocalloc_size += %d * sizeof(buf_meta_t);\n\tocalloc_size += %d * sizeof(struct_deep_meta_t);\n" ptr_cnt deep_cnt in
+  let deep_struct_def = sprintf "\n\n\tsize_t** _size_arr[%d];\n\tsize_t* _offset_arr[%d];\n" deep_cnt deep_cnt in
+  let local_meta_block = sprintf "%s\tocalloc_size += sizeof(param_meta_t);\n\tocalloc_size += %d * sizeof(buf_meta_t);\n\tocalloc_size += %d * sizeof(struct_deep_meta_t);\n" deep_struct_def ptr_cnt deep_cnt in
   let local_vars_block = sprintf "%s* %s = NULL;\n\tsize_t ocalloc_size = sizeof(%s);\n\tvoid *__tmp = NULL;\n\n" ms_struct_name ms_struct_val ms_struct_name in
   let local_var (ty: Ast.atype) (attr: Ast.ptr_attr) (name: string) =
     if not attr.Ast.pa_chkptr then ""
@@ -2134,11 +2207,11 @@ let gen_ocalloc_block_struct_deep_copy (fname: string) (plist: Ast.pdecl list) (
   let new_param_list = List.map conv_array_to_ptr plist in
   let sgx_ocalloc_fn = get_sgx_fname SGX_OCALLOC is_ocall_switchless in
   let sgx_ocfree_fn = get_sgx_fname SGX_OCFREE is_ocall_switchless in
-  let count_ocalloc_size (ty: Ast.atype) (attr: Ast.ptr_attr) (name: string) =
+  let count_ocalloc_size deep_struct_ptr_idx (ty: Ast.atype) (attr: Ast.ptr_attr) (name: string) =
     if not attr.Ast.pa_chkptr then ""
     else 
       let count_struct_ocalloc_size =  
-         let gen_member_size (_: Ast.ptr_direction) (_: string) (struct_name: string)  (ty: Ast.atype) (attr: Ast.ptr_attr) (declr: Ast.declarator) =
+         let gen_member_size idx (_: Ast.ptr_direction) (_: string) (struct_name: string)  (ty: Ast.atype) (attr: Ast.ptr_attr) (declr: Ast.declarator) =
            let in_len_ptr_var = mk_len_var2 struct_name declr.Ast.identifier in
            let para_struct = sprintf "(%s + i)->%s"  struct_name in
            let check_size =
@@ -2152,6 +2225,7 @@ let gen_ocalloc_block_struct_deep_copy (fname: string) (plist: Ast.pdecl list) (
                        "}";
                     ]
            in
+           (* TODO: idx *)
            let code_template = 
                [
                gen_check_member_length ty attr declr para_struct "\t\t\t" [(sprintf "\t%s();" sgx_ocfree_fn);"\treturn SGX_ERROR_INVALID_PARAMETER;"];
@@ -2167,11 +2241,12 @@ let gen_ocalloc_block_struct_deep_copy (fname: string) (plist: Ast.pdecl list) (
                sprintf "\t%s();" sgx_ocfree_fn;
                "\treturn SGX_ERROR_INVALID_PARAMETER;";
                "}";
+               sprintf "_size_arr[%d][i][%d] = %s;" deep_struct_ptr_idx idx in_len_ptr_var
                ]
            in
            List.fold_left (fun acc s -> acc ^ "\t\t\t" ^ s ^ "\n") "" code_template
          in
-         invoke_if_struct ty attr.Ast.pa_direction name (fun struct_type name -> sprintf "\t\tfor (i = 0; i < %s / sizeof(struct %s); i++){\n"  (mk_len_var name) struct_type) gen_member_size "\t\t}\n"
+         invoke_if_struct_with_filter ty attr.Ast.pa_direction name (fun struct_type name -> sprintf "\t\tfor (i = 0; i < %s / sizeof(struct %s); i++){\n"  (mk_len_var name) struct_type) is_ptr_type gen_member_size "\t\t}\n"
       in
       if count_struct_ocalloc_size <> "" then
                   sprintf "\tif (%s != NULL && %s != 0){\n" name (mk_len_var name) ^
@@ -2179,11 +2254,15 @@ let gen_ocalloc_block_struct_deep_copy (fname: string) (plist: Ast.pdecl list) (
                   "\t}\n"
       else ""
   in
+  let deep_struct_ptr_idx = ref (-1) in
   let do_count_ocalloc_size (pd: Ast.pdecl) =
     let (pty, declr) = pd in
       match pty with
         Ast.PTVal _          -> ""
-      | Ast.PTPtr (ty, attr) -> count_ocalloc_size ty attr declr.Ast.identifier
+      | Ast.PTPtr (ty, attr) -> begin
+                                  deep_struct_ptr_idx := !deep_struct_ptr_idx + 1;
+                                  count_ocalloc_size !deep_struct_ptr_idx ty attr declr.Ast.identifier
+                                end
   in
   let do_gen_ocalloc_block = [
       sprintf "\n\t__tmp = %s(ocalloc_size);\n" sgx_ocalloc_fn;
@@ -2351,11 +2430,14 @@ let gen_func_tproxy (ufunc: Ast.untrusted_func) (idx: int) =
     if (is_naked_func fd) && (propagate_errno = false) then
         sprintf "%s\t%s\t%s%s" func_open local_vars ocall_null "\n\treturn status;\n}"
     else
+      let deep_idx = ref 0 in
       begin
         (*FIXME: `ocalloc_size` *)
         func_body := local_vars :: !func_body;
         func_body := ocalloc_ms_struct:: !func_body;
-        List.iter (fun pd -> func_body := tproxy_fill_ms_field pd ufunc.Ast.uf_is_switchless :: !func_body ) (fd.Ast.plist);
+        List.iter (fun pd -> func_body := tproxy_fill_ms_field deep_cnt !deep_idx pd ufunc.Ast.uf_is_switchless :: !func_body ;
+                             deep_idx := !deep_idx + if is_deep_copy pd then 1 else 0)
+                  (fd.Ast.plist);
         func_body := ocalloc_struct_deep_copy ufunc.Ast.uf_is_switchless :: !func_body;
         List.iter (fun pd -> func_body := tproxy_fill_structure pd ufunc.Ast.uf_is_switchless:: !func_body) (fd.Ast.plist);
         (* Add the meta assignments *)
